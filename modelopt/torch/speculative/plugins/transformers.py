@@ -427,8 +427,8 @@ class HFEagleModel(EagleModel):
         logits_to_keep: int = 0,
         loss_mask: torch.Tensor | None = None,
         freeze_base_model: bool = True,
-        classification_loss_coefficient: float | None = 1,
-        regression_loss_coefficient: float | None = 0.1,
+        classification_loss_coefficient: float | None = 0.1,
+        regression_loss_coefficient: float | None = 1,
         **kwargs,
     ) -> Any:
         """Forward pass of the EagleModel.
