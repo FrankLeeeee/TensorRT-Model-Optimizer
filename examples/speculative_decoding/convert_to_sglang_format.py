@@ -28,7 +28,7 @@ PARAM_MAPPING = {
     "eagle_module.layers.0.post_attention_layernorm.weight": "midlayer.post_attention_layernorm.weight",
 
     # lm head
-    "lm_head.weight": "lm_head.weight",
+    "eagle_module.lm_head.weight": "lm_head.weight",
 }
 
 

@@ -180,12 +180,12 @@ class EagleModule(nn.Module):
         )
         if use_last_layernorm:
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor,
-        lm_head: nn.Module,
         attention_mask: torch.Tensor | None = None,
         loss_mask: torch.Tensor | None = None,
         logits: torch.Tensor | None = None,
@@ -244,7 +244,7 @@ class EagleModule(nn.Module):
         if hasattr(self, "norm"):
             hidden_states = self.norm(hidden_states)
 
-        logits = lm_head(hidden_states).to(hidden_states.device)
+        logits = self.lm_head(hidden_states).to(hidden_states.device)
 
         return proj_hidden_states, hidden_states, logits, past_key_values
 
@@ -505,7 +505,6 @@ class HFEagleModel(EagleModel):
         hidden_states, eagle_hidden_states, eagle_logits, eagle_cache = self.eagle_module(
             hidden_states,
             inputs_embeds,
-            self.lm_head,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=eagle_cache,
@@ -546,8 +545,7 @@ class HFEagleModel(EagleModel):
             )
             # use classification loss only for EAGLE-3
             eagle_loss = (
-                regression_loss_coefficient * regression_loss +
-                classification_loss_coefficient * classification_loss
+                classification_loss
             )
             if loss is None:
                 loss = eagle_loss
