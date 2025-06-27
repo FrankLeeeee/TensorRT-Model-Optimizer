@@ -122,6 +122,13 @@ else
   MULTI_GPU="--multi_gpu"
 fi
 
+
+# if WANDB_PROJECT is set, we enable wandb
+WANDB_ARGS=""
+if [[ -n "$WANDB_PROJECT" ]]; then
+  WANDB_ARGS="--report_to wandb"
+fi
+
 CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
     --mode $MODE \
     --model_name_or_path $MODEL \
