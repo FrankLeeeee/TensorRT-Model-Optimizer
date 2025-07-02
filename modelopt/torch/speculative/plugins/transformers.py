@@ -233,7 +233,6 @@ class EagleModule(nn.Module):
                 col_idx = block_start + i
                 if col_idx < extended_src_len:
                     extended_mask[:, :, i, col_idx] = 0.0  # 允许attention
-        
         return extended_mask
         
 
@@ -256,7 +255,7 @@ class EagleModule(nn.Module):
         proj_hidden_states = hidden_states
 
         attention_mask = self._prepare_tree_attention_mask(
-            attention_mask, hidden_states.shape[1], past_key_values.get_seq_length() + hidden_states.shape[1]
+            attention_mask, hidden_states.shape[1], past_key_values.get_seq_length()
         )
 
         for idx, decoder_layer in enumerate(self.layers):
@@ -282,13 +281,39 @@ class EagleModule(nn.Module):
 
 
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaRMSNorm, LlamaDecoderLayer
-from typing import Optional, Tuple, Unpack
+from typing import Optional, Tuple, Unpack, Callable
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
-from transformers.models.llama.modeling_llama import FlashAttentionKwargs
+from transformers.models.llama.modeling_llama import FlashAttentionKwargs, apply_rotary_pos_emb, repeat_kv
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        # use tree mask here
+        # print(attn_weights.shape, attention_mask.shape)
+        attn_weights = attn_weights + attention_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
 
 class ModifiedLlamaAttention(LlamaAttention):
     def __init__(self, config, layer_idx):
@@ -298,6 +323,46 @@ class ModifiedLlamaAttention(LlamaAttention):
         self.v_proj = nn.Linear(config.hidden_size * 2 , config.num_key_value_heads * config.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.num_attention_heads * config.head_dim, config.hidden_size, bias=config.attention_bias)
         
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        attention_interface: Callable = eager_attention_forward
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
 
 class ModifiedLlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config, layer_idx):
@@ -535,22 +600,30 @@ class HFEagleModel(EagleModel):
             attention_mask, (batch_size, seq_length), hidden_states, past_key_values_length
         )
         
+        print(attention_mask.shape)
+        
+        # prepare origin position ids
+        # 在循环开始前
+        original_position_ids = position_ids.clone()
 
         for i in range(4):
             if torch.distributed.get_rank() == 1:
                 print("ttt_step: ", i)
                 print("kv cache len: ", eagle_cache.get_seq_length())
 
+            # update position ids
+            cache_length = eagle_cache.get_seq_length()
+            current_position_ids = original_position_ids + cache_length
             with torch.no_grad():
                 inputs_embeds = self.model.embed_tokens(input_ids)
 
-            position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
+            position_embeddings = self.model.rotary_emb(hidden_states, current_position_ids)
 
             _, eagle_hidden_states, eagle_logits, eagle_cache = self.eagle_module(
                 hidden_states,
                 inputs_embeds,
                 attention_mask=attention_mask,
-                position_ids=position_ids,
+                position_ids=current_position_ids,
                 past_key_values=eagle_cache,
                 use_cache=True,
                 output_attentions=output_attentions,
