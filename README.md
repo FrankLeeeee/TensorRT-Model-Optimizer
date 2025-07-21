@@ -6,7 +6,7 @@
 
 [![Documentation](https://img.shields.io/badge/Documentation-latest-brightgreen.svg?style=flat)](https://nvidia.github.io/TensorRT-Model-Optimizer)
 [![version](https://img.shields.io/pypi/v/nvidia-modelopt?label=Release)](https://pypi.org/project/nvidia-modelopt/)
-[![license](https://img.shields.io/badge/License-Apache%202.0-blue)](./LICENSE)
+[![license](https://img.shields.io/badge/License-MIT%202.0-blue)](./LICENSE)
 
 [Examples](#examples) |
 [Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer) |
